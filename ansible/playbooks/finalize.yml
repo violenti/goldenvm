@@ -1,0 +1,145 @@
+---
+- name: Finalizar la imagen Debian 13 después del reinicio
+  hosts: packer
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Esperar a que SSH y Python estén disponibles
+      ansible.builtin.wait_for_connection:
+        timeout: 600
+
+    - name: Recopilar los datos del sistema arrancado
+      ansible.builtin.setup:
+
+    - name: Comprobar la distribución
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Debian'
+          - ansible_facts['distribution_major_version'] == '13'
+        fail_msg: La finalización requiere Debian 13.
+
+    - name: Comprobar que los paquetes críticos siguen instalados
+      ansible.builtin.command:
+        argv:
+          - dpkg-query
+          - -W
+          - '-f=${Status}'
+          - "{{ item }}"
+        expand_argument_vars: false
+      loop:
+        - google-guest-agent
+        - google-compute-engine-oslogin
+        - openssh-server
+      register: critical_package
+      changed_when: false
+      failed_when: critical_package.rc != 0 or critical_package.stdout != 'install ok installed'
+
+    - name: Consultar el estado de los servicios
+      ansible.builtin.service_facts:
+
+    - name: Comprobar que SSH está activo
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['services'].get('ssh.service', {}).get('state', '') == 'running'
+        fail_msg: El servicio SSH debe estar activo antes de capturar la imagen.
+
+    - name: Crear el directorio del inventario
+      ansible.builtin.file:
+        path: /etc/golden-image
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Consultar los paquetes y sus versiones
+      ansible.builtin.command:
+        argv:
+          - dpkg-query
+          - -W
+          - '-f=${Package}\t${Version}\n'
+        expand_argument_vars: false
+      register: installed_packages
+      changed_when: false
+
+    - name: Guardar el inventario de la imagen
+      ansible.builtin.copy:
+        dest: "/etc/golden-image/{{ item.name }}"
+        content: "{{ item.content }}\n"
+        owner: root
+        group: root
+        mode: '0644'
+      loop:
+        - name: build-time
+          content: "{{ ansible_facts['date_time']['iso8601'] }}"
+        - name: packages.tsv
+          content: "{{ installed_packages.stdout }}"
+        - name: kernel-version
+          content: "{{ ansible_facts['kernel'] }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # Usar apt-get directamente evita instalar dependencias de módulos
+    # después de haber registrado el inventario de paquetes.
+    - name: Limpiar los paquetes descargados de APT
+      ansible.builtin.command:
+        argv: [apt-get, clean]
+      changed_when: true
+
+    - name: Buscar los índices descargados de APT
+      ansible.builtin.find:
+        paths: /var/lib/apt/lists
+        file_type: any
+        hidden: true
+        recurse: false
+      register: apt_lists
+
+    - name: Eliminar los índices descargados de APT
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ apt_lists.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    # La captura debe ocurrir después de esta limpieza, sin otro reinicio.
+    - name: Vaciar el identificador de máquina
+      ansible.builtin.copy:
+        dest: /etc/machine-id
+        content: ''
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Vincular el identificador de D-Bus al identificador de máquina
+      ansible.builtin.file:
+        src: /etc/machine-id
+        dest: /var/lib/dbus/machine-id
+        state: link
+        force: true
+
+    # El entorno invitado de Google genera claves propias en el primer arranque.
+    - name: Buscar las claves de host SSH de la VM temporal
+      ansible.builtin.find:
+        paths: /etc/ssh
+        patterns: 'ssh_host_*'
+        file_type: any
+        recurse: false
+      register: ssh_host_keys
+
+    - name: Eliminar las claves de host SSH de la VM temporal
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ ssh_host_keys.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Eliminar la semilla aleatoria de la VM temporal
+      ansible.builtin.file:
+        path: /var/lib/systemd/random-seed
+        state: absent
+
+    - name: Sincronizar las escrituras antes de capturar la imagen
+      ansible.builtin.command:
+        argv: [sync]
+      changed_when: false

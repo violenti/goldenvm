@@ -1,0 +1,12 @@
+# Variables locales y archivos generados por Packer.
+*.pkrvars.hcl
+!*.example.pkrvars.hcl
+.packer.d/
+.ansible/
+.ansible-lint-cache/
+.cache/
+packer_cache/
+manifest.json
+crash.log
+gha-creds-*.json
+__pycache__/

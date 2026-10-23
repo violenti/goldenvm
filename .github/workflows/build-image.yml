@@ -1,0 +1,137 @@
+name: Build Debian 13 GCP image
+run-name: Build ${{ inputs.image_family }} with ${{ inputs.playbook }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      playbook:
+        description: Playbook del repositorio
+        type: string
+        required: true
+        default: ansible/playbooks/base.yml
+      image_family:
+        description: Familia de la imagen resultante
+        type: string
+        required: true
+        default: debian-13-base
+      ansible_extra_arguments:
+        description: Argumentos de Ansible como lista JSON de strings
+        type: string
+        required: false
+        default: '[]'
+      ansible_requirements_file:
+        description: Archivo requirements.yml de Galaxy (opcional)
+        type: string
+        required: false
+        default: ''
+      source_image:
+        description: Imagen oficial concreta de debian-cloud (opcional)
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+# Serializa las publicaciones y permite terminar la limpieza del build activo.
+concurrency:
+  group: gcp-image-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # El workflow de construcción se ejecuta sobre la rama predeterminada.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    environment: gcp-images
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PACKER_PLUGIN_PATH: ${{ github.workspace }}/.packer.d/plugins
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+      GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+      PKR_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
+      PKR_VAR_zone: ${{ vars.GCP_ZONE || 'us-central1-a' }}
+      PKR_VAR_network: ${{ vars.GCP_NETWORK || 'default' }}
+      PKR_VAR_subnetwork: ${{ vars.GCP_SUBNETWORK }}
+      PKR_VAR_network_project_id: ${{ vars.GCP_NETWORK_PROJECT_ID }}
+      PKR_VAR_machine_type: ${{ vars.GCP_MACHINE_TYPE || 'e2-standard-2' }}
+      PKR_VAR_use_iap: 'true'
+      PKR_VAR_ansible_playbook_file: ${{ inputs.playbook }}
+      PKR_VAR_image_family: ${{ inputs.image_family }}
+      PKR_VAR_ansible_extra_arguments: ${{ inputs.ansible_extra_arguments }}
+      PKR_VAR_source_image: ${{ inputs.source_image }}
+      ANSIBLE_REQUIREMENTS_FILE: ${{ inputs.ansible_requirements_file }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+
+      - name: Check build inputs
+        run: python .github/scripts/check-build-inputs.py
+
+      - name: Install Ansible
+        run: python -m pip install -r requirements-ci.txt
+
+      - name: Install playbook dependencies
+        if: env.ANSIBLE_REQUIREMENTS_FILE != ''
+        run: ansible-galaxy install -r "$ANSIBLE_REQUIREMENTS_FILE"
+
+      - name: Check selected playbook
+        run: ansible-playbook --syntax-check -i 'packer,' "$PKR_VAR_ansible_playbook_file"
+
+      - name: Check finalization playbook
+        run: ansible-playbook --syntax-check -i 'packer,' ansible/playbooks/finalize.yml
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@v3
+        with:
+          version: '1.14.0'
+
+      - name: Check Packer formatting
+        run: packer fmt -check .
+
+      - name: Install Packer plugins
+        run: packer init .
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Setup gcloud for IAP
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Validate Packer configuration
+        run: packer validate .
+
+      - name: Build image
+        timeout-minutes: 75
+        run: packer build -color=false -on-error=cleanup .
+
+      - name: Publish build summary
+        run: python .github/scripts/image-summary.py
+
+      - name: Upload image manifest
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: image-manifest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: manifest.json
+          if-no-files-found: ignore
+          retention-days: 30

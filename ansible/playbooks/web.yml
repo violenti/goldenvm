@@ -1,0 +1,21 @@
+---
+- name: Preparar la base común
+  ansible.builtin.import_playbook: base.yml
+
+- name: Preparar una imagen con servidor web
+  hosts: packer
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Instalar Nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        install_recommends: false
+        lock_timeout: 600
+
+    - name: Habilitar Nginx al arrancar
+      ansible.builtin.systemd_service:
+        name: nginx
+        enabled: true

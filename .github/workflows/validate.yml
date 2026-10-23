@@ -1,0 +1,62 @@
+name: Validate image configuration
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PACKER_PLUGIN_PATH: ${{ github.workspace }}/.packer.d/plugins
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+
+      - name: Install Ansible
+        run: python -m pip install -r requirements-ci.txt
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@v3
+        with:
+          version: '1.14.0'
+
+      - name: Check Packer formatting
+        run: packer fmt -check .
+
+      - name: Install Packer plugins
+        run: packer init .
+
+      - name: Validate Packer configuration
+        run: packer validate -var-file=debian13.example.pkrvars.hcl .
+
+      - name: Run unit and configuration tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Check all included playbooks
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' playbook; do
+            ansible-playbook --syntax-check -i 'packer,' "$playbook"
+          done < <(find ansible/playbooks -type f \( -name '*.yml' -o -name '*.yaml' \) -print0)

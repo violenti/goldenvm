@@ -1,0 +1,2 @@
+# Controlador utilizado por los workflows de validación y construcción.
+ansible-core==2.20.10

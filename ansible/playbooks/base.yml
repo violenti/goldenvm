@@ -1,0 +1,41 @@
+---
+- name: Preparar la imagen base Debian 13
+  hosts: packer
+  become: true
+  gather_facts: true
+
+  vars:
+    base_packages:
+      - ca-certificates
+      - curl
+
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+    NEEDRESTART_MODE: a
+
+  pre_tasks:
+    - name: Comprobar distribución y arquitectura
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Debian'
+          - ansible_facts['distribution_major_version'] == '13'
+          - ansible_facts['architecture'] == 'x86_64'
+        fail_msg: Este playbook requiere Debian 13 amd64.
+
+  tasks:
+    - name: Actualizar los paquetes instalados
+      ansible.builtin.apt:
+        update_cache: true
+        update_cache_retries: 5
+        update_cache_retry_max_delay: 15
+        upgrade: dist
+        force_apt_get: true
+        lock_timeout: 600
+        dpkg_options: force-confdef,force-confold
+
+    - name: Instalar los paquetes de la imagen base
+      ansible.builtin.apt:
+        name: "{{ base_packages }}"
+        state: present
+        install_recommends: false
+        lock_timeout: 600
